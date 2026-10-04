@@ -1,0 +1,35 @@
+{
+  "name": "openfox-multirepo-plugin",
+  "version": "1.0.0",
+  "description": "Support multi-dépôts Git et orchestration de multiples serveurs de dev pour OpenFox.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "openfox": {
+    "apiVersion": 2,
+    "entry": "./dist/index.js",
+    "displayName": "Multi-Repo & Multi-DevServer",
+    "description": "Support multi-dépôts Git et orchestration de multiples serveurs de dev pour OpenFox.",
+    "icon": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#3b82f6\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><line x1=\"6\" y1=\"3\" x2=\"6\" y2=\"15\"/><circle cx=\"18\" cy=\"6\" r=\"3\"/><circle cx=\"6\" cy=\"18\" r=\"3\"/><path d=\"M18 9a9 9 0 0 1-9 9\"/></svg>",
+    "capabilities": [
+      "vcs",
+      "transforms",
+      "tools",
+      "commands",
+      "ui",
+      "rpc",
+      "settings"
+    ],
+    "timeoutMs": 15000
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsup": "^8.4.0",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.2"
+  }
+}
