@@ -220,4 +220,65 @@ describe('discovery & configuration module', () => {
     expect(devServices[4]?.command).toBe('npm run dev')
     expect(devServices[4]?.kind).toBe('server')
   })
+
+  it('supports explicit path field with leading ./ like {"name": "openfox", "path": "./openfox"} preserving discovery and dev commands', async () => {
+    const openfoxDir = join(tempDir, '.openfox')
+    await mkdir(openfoxDir, { recursive: true })
+
+    const config = {
+      projects: [
+        {
+          name: 'openfox',
+          path: './openfox',
+          dev: [{ name: 'dev', command: 'OPENFOX_PORT=10469 npm run dev', icon: 'PlayIcon' }],
+        },
+        {
+          name: 'agent-office',
+          path: './agent-office',
+        },
+      ],
+    }
+
+    await writeFile(join(openfoxDir, 'openfox-multi-repo.json'), JSON.stringify(config, null, 2))
+
+    const repos = await findSubGitRepos(tempDir)
+    expect(repos).toHaveLength(2)
+    expect(repos[0]).toEqual({
+      name: 'openfox',
+      relativePath: 'openfox',
+      absolutePath: join(tempDir, 'openfox'),
+    })
+    expect(repos[1]).toEqual({
+      name: 'agent-office',
+      relativePath: 'agent-office',
+      absolutePath: join(tempDir, 'agent-office'),
+    })
+
+    const services = await discoverDevServices(tempDir)
+    expect(services).toHaveLength(1)
+    expect(services[0]?.projectName).toBe('openfox')
+    expect(services[0]?.command).toBe('OPENFOX_PORT=10469 npm run dev')
+    expect(services[0]?.relativePath).toBe('openfox')
+  })
+
+  it('explicit path takes precedence over any legacy dynamic key', async () => {
+    const openfoxDir = join(tempDir, '.openfox')
+    await mkdir(openfoxDir, { recursive: true })
+
+    const config = {
+      projects: [
+        {
+          name: 'hybrid',
+          path: './canonical-path',
+          './legacy-path': 'frontend',
+        },
+      ],
+    }
+
+    await writeFile(join(openfoxDir, 'openfox-multi-repo.json'), JSON.stringify(config, null, 2))
+
+    const repos = await findSubGitRepos(tempDir)
+    expect(repos).toHaveLength(1)
+    expect(repos[0]?.relativePath).toBe('canonical-path')
+  })
 })

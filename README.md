@@ -11,6 +11,32 @@ Multi-repository Git management and multi-devserver orchestration plugin for [Op
 - **Tools & RPC**: Built-in agent tools (`multirepo_list`, `multirepo_status`, `multirepo_git_action`, `multirepo_devserver_action`) for automated multi-repo workflows.
 - **UI Slot**: Integrated status bar & multi-repo view for the OpenFox web interface.
 
+## Configuration
+
+Configure your multi-repo workspace in `.openfox/openfox-multi-repo.json` at the root of your workspace. Each project entry uses `"path"` to specify the repository folder.
+
+```json
+{
+  "projects": [
+    {
+      "name": "frontend",
+      "path": "./frontend",
+      "dev": [
+        { "name": "web", "command": "npm run dev", "icon": "PlayIcon" }
+      ],
+      "commands": [
+        { "name": "build", "command": "npm run build", "icon": "GearIcon" },
+        { "icon": "CheckIcon", "command": "npm run lint" }
+      ]
+    },
+    {
+      "name": "backend",
+      "path": "./backend"
+    }
+  ]
+}
+```
+
 ## Installation
 
 Install via OpenFox Plugin Manager or clone and build directly:

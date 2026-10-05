@@ -1,4 +1,4 @@
-import { join } from 'node:path'
+import { join, basename } from 'node:path'
 import type { DeclarativeNode, PluginRegistry, PluginToolContext } from 'openfox/plugin'
 import { multirepoVcsProvider } from './vcs-provider.js'
 import { multirepoAgentTransform } from './transforms.js'
@@ -8,6 +8,14 @@ import { startService, stopService, stopAllServices, getServicesState, getServic
 import { findSubGitRepos, discoverDevServices, type DevServerService } from './discovery.js'
 import { getCurrentBranch, listRepoBranches, switchRepoBranch, createRepoBranch, getRepoDefaultBranch } from './git-ops.js'
 import { resolveLucideIcon } from './icons.js'
+import {
+  scanGitRepositories,
+  getConfiguredProjectPaths,
+  addProjectsToMultiRepoConfig,
+  syncProjectsWithMultiRepoConfig,
+  normalizeRepoPath,
+  type DiscoveredGitRepo,
+} from './repository-scanner.js'
 export * from './icons.js'
 
 interface BranchModalDraft {
@@ -27,6 +35,25 @@ function setBranchDraft(repoName: string, patch: Partial<BranchModalDraft>): Bra
   const next = { ...getBranchDraft(repoName), ...patch }
   branchDrafts.set(repoName, next)
   return next
+}
+
+interface HelpModalDraft {
+  selectedPaths: Set<string>
+  statusMessage?: { en: string; fr: string } | undefined
+  statusTone?: 'success' | 'danger' | 'info' | undefined
+  discovered?: DiscoveredGitRepo[] | undefined
+  scanErrors?: string[] | undefined
+}
+
+const helpModalDrafts = new Map<string, HelpModalDraft>()
+
+function getHelpModalDraft(workdir: string): HelpModalDraft {
+  let draft = helpModalDrafts.get(workdir)
+  if (!draft) {
+    draft = { selectedPaths: new Set() }
+    helpModalDrafts.set(workdir, draft)
+  }
+  return draft
 }
 
 async function buildBranchModalContent(repoName: string, repoAbsolutePath: string): Promise<DeclarativeNode[]> {
@@ -308,38 +335,40 @@ async function buildGitSidebarUi(context: PluginToolContext) {
             direction: 'row',
             align: 'center',
             justify: 'between',
-            className: 'w-full',
+            gap: 'xs',
+            className: 'w-full min-w-0',
             children: [
-              // Left: 📁 name
+              // Left: 📁 name (can shrink, truncates with ellipsis)
               {
                 type: 'stack',
                 direction: 'row',
                 align: 'center',
                 gap: 'xs',
-                className: 'w-auto shrink-0 mr-2',
+                className: 'min-w-0 flex-1 mr-2',
                 children: [
                   { type: 'icon', icon: 'FolderIcon', className: 'w-4 h-4 text-text-muted shrink-0' },
                   {
                     type: 'text',
                     text: { en: repo.name, fr: repo.name },
-                    className: 'font-semibold text-text-primary text-sm truncate',
+                    title: { en: repo.name, fr: repo.name },
+                    className: 'font-semibold text-text-primary text-sm truncate min-w-0',
                   },
                 ],
               },
-              // Right: 🌿 branch + ✏️ Edit button
+              // Right: 🌿 branch + ✏️ Edit button (capped max width, truncates, pencil button never cut off)
               {
                 type: 'stack',
                 direction: 'row',
                 align: 'center',
                 gap: 'xs',
-                className: 'w-auto shrink-0 min-w-0 flex items-center',
+                className: 'min-w-0 shrink-0 max-w-[50%] flex items-center',
                 children: [
                   { type: 'icon', icon: 'BranchIcon', className: 'w-3.5 h-3.5 text-text-muted shrink-0' },
                   {
                     type: 'text',
                     text: { en: branch, fr: branch },
                     title: { en: branch, fr: branch },
-                    className: 'font-mono text-xs text-text-secondary truncate whitespace-nowrap',
+                    className: 'font-mono text-xs text-text-secondary truncate min-w-0',
                   },
                   {
                     type: 'button',
@@ -347,7 +376,8 @@ async function buildGitSidebarUi(context: PluginToolContext) {
                     title: { en: 'Switch branch', fr: 'Changer de branche' },
                     icon: 'PencilIcon',
                     variant: 'ghost',
-                    className: '!h-6 !w-6 !p-0 !min-w-6 text-text-muted hover:text-text-primary rounded transition-colors flex items-center justify-center shrink-0',
+                    className:
+                      '!h-6 !w-6 !p-0 !min-w-6 text-text-muted hover:text-text-primary rounded transition-colors flex items-center justify-center shrink-0 ml-0.5',
                     onActivate: {
                       kind: 'rpc',
                       method: 'openBranchModal',
@@ -461,29 +491,227 @@ async function buildDevLogsModalContent(name: string, context: PluginToolContext
   ]
 }
 
-function buildDevHelpModalContent(): DeclarativeNode[] {
+async function buildDevHelpModalContent(context?: PluginToolContext): Promise<DeclarativeNode[]> {
+  const workdir = context?.workdir ?? process.cwd()
+  const draft = getHelpModalDraft(workdir)
+
+  if (!draft.discovered) {
+    const scan = await scanGitRepositories(workdir)
+    draft.discovered = scan.repos
+    draft.scanErrors = scan.errors
+    // Pre-populate selectedPaths with already configured repositories so all checkboxes reflect active state
+    const currentConfigured = await getConfiguredProjectPaths(workdir)
+    for (const repo of scan.repos) {
+      if (currentConfigured.has(normalizeRepoPath(repo.relativePath))) {
+        draft.selectedPaths.add(repo.relativePath)
+      }
+    }
+  }
+
+  const configuredPaths = await getConfiguredProjectPaths(workdir)
+  const discovered = draft.discovered ?? []
+  const selectedCount = draft.selectedPaths.size
+
+  const autoDetectChildren: DeclarativeNode[] = [
+    {
+      type: 'text',
+      text: {
+        en: 'Discover Git repositories in this directory and subdirectories, check or uncheck them, then save to .openfox/openfox-multi-repo.json (preserves existing dev servers and commands).',
+        fr: 'Détectez les dépôts Git dans ce dossier et ses sous-dossiers, cochez ou décochez-les, puis enregistrez dans .openfox/openfox-multi-repo.json (préserve les serveurs dev et commandes existants).',
+      },
+      className: 'text-xs text-text-secondary leading-relaxed mb-2',
+    },
+  ]
+
+  if (draft.scanErrors && draft.scanErrors.length > 0) {
+    autoDetectChildren.push({
+      type: 'callout',
+      tone: 'danger',
+      title: { en: 'Scan warnings / errors', fr: 'Avertissements / erreurs du scan' },
+      text: {
+        en: draft.scanErrors.join('\n'),
+        fr: draft.scanErrors.join('\n'),
+      },
+    })
+  }
+
+  if (draft.statusMessage) {
+    autoDetectChildren.push({
+      type: 'callout',
+      tone: draft.statusTone ?? 'info',
+      text: draft.statusMessage,
+    })
+  }
+
+  if (discovered.length === 0) {
+    autoDetectChildren.push({
+      type: 'text',
+      text: {
+        en: 'No Git repositories detected in subdirectories.',
+        fr: 'Aucun sous-dépôt Git détecté dans les sous-dossiers.',
+      },
+      className: 'text-xs text-text-muted italic py-1',
+    })
+  } else {
+    autoDetectChildren.push({
+      type: 'stack',
+      direction: 'row',
+      align: 'center',
+      justify: 'between',
+      className: 'mb-1 mt-1',
+      children: [
+        {
+          type: 'text',
+          text: {
+            en: `${discovered.length} Git repository(ies) detected (${selectedCount} selected)`,
+            fr: `${discovered.length} dépôt(s) Git détecté(s) (${selectedCount} sélectionné(s))`,
+          },
+          className: 'text-xs text-text-muted',
+        },
+        {
+          type: 'stack',
+          direction: 'row',
+          align: 'center',
+          gap: 'xs',
+          children: [
+            {
+              type: 'button',
+              variant: 'default',
+              label: { en: 'Select All', fr: 'Tout sélectionner' },
+              disabled: selectedCount === discovered.length,
+              className: '!text-xs !py-1 !px-2',
+              onActivate: {
+                kind: 'rpc',
+                method: 'selectAllHelpReposRpc',
+                params: {},
+              },
+            },
+            {
+              type: 'button',
+              variant: 'default',
+              label: { en: 'Unselect All', fr: 'Tout désélectionner' },
+              disabled: selectedCount === 0,
+              className: '!text-xs !py-1 !px-2',
+              onActivate: {
+                kind: 'rpc',
+                method: 'unselectAllHelpReposRpc',
+                params: {},
+              },
+            },
+          ],
+        },
+      ],
+    })
+
+    const repoRows: DeclarativeNode[] = discovered.map((repo) => {
+      const norm = normalizeRepoPath(repo.relativePath)
+      const isConfigured = configuredPaths.has(norm)
+      const isSelected = draft.selectedPaths.has(repo.relativePath)
+
+      return {
+        type: 'stack',
+        direction: 'row',
+        align: 'center',
+        gap: 'sm',
+        className: 'py-1 hover:bg-bg-tertiary/50 px-1 rounded transition-colors',
+        children: [
+          {
+            type: 'input',
+            id: `repo-select-${norm.replace(/[^a-zA-Z0-9_-]/g, '-')}`,
+            inputType: 'checkbox',
+            defaultChecked: isSelected,
+            disabled: false,
+            onChange: {
+              kind: 'rpc',
+              method: 'toggleHelpRepoSelection',
+              params: { repoPath: repo.relativePath },
+            },
+          },
+          {
+            type: 'text',
+            text: {
+              en: isConfigured
+                ? `${repo.name} (${repo.relativePath}) — in config`
+                : `${repo.name} (${repo.relativePath})`,
+              fr: isConfigured
+                ? `${repo.name} (${repo.relativePath}) — dans config`
+                : `${repo.name} (${repo.relativePath})`,
+            },
+            className: isConfigured
+              ? 'text-xs font-mono text-accent-primary truncate'
+              : 'text-xs font-mono text-text-primary truncate',
+          },
+        ],
+      }
+    })
+
+    autoDetectChildren.push({
+      type: 'stack',
+      direction: 'column',
+      align: 'stretch',
+      gap: 'none',
+      className: 'w-full max-h-56 overflow-y-auto pr-1 border border-border rounded p-2 bg-bg-primary/50 my-2',
+      children: repoRows,
+    })
+  }
+
+  autoDetectChildren.push({
+    type: 'stack',
+    direction: 'row',
+    align: 'center',
+    gap: 'sm',
+    className: 'mt-2 pt-2 border-t border-border',
+    children: [
+      {
+        type: 'button',
+        variant: 'primary',
+        label: {
+          en: `Save to config (${selectedCount})`,
+          fr: `Enregistrer dans la config (${selectedCount})`,
+        },
+        icon: 'CheckIcon',
+        onActivate: {
+          kind: 'rpc',
+          method: 'addSelectedReposToConfig',
+          params: {},
+        },
+      },
+      {
+        type: 'button',
+        variant: 'default',
+        label: { en: 'Rescan', fr: 'Re-scanner' },
+        icon: 'RefreshCwIcon',
+        onActivate: {
+          kind: 'rpc',
+          method: 'rescanReposRpc',
+          params: {},
+        },
+      },
+    ],
+  })
+
   const exampleJson = `{
   "projects": [
     {
-      "name": "gpat",
-      "./hub-gan-pat-mobile": "frontend",
+      "name": "frontend",
+      "path": "./frontend",
       "dev": [
-        { "name": "start-pprod", "command": "npm run start-pprod", "icon": "play" }
+        { "name": "web", "command": "npm run dev", "icon": "play" }
       ],
       "commands": [
         { "name": "build", "command": "npm run build", "icon": "gear" },
         { "icon": "check", "command": "npm run lint" },
-        { "name": "migrate", "command": "npm run db:migrate", "separateLine": true }
+        { "name": "test", "command": "npm run test", "separateLine": true }
       ]
     },
     {
-      "name": "bff",
-      "./hubgpat-bff": "bff",
-      "dev": "npm run dev"
+      "name": "backend",
+      "path": "./backend",
+      "dev": "npm run start"
     },
     {
-      "name": "lib-vie",
-      "./lib-vie-workspace": "lib"
+      "name": "shared-lib",
+      "path": "./packages/shared-lib"
     }
   ]
 }`
@@ -497,12 +725,20 @@ function buildDevHelpModalContent(): DeclarativeNode[] {
       className: 'w-full max-h-[75vh] overflow-y-auto pr-1',
       children: [
         {
+          type: 'card',
+          title: {
+            en: 'Auto-Detect Git Projects',
+            fr: 'Détection automatique des projets Git',
+          },
+          children: autoDetectChildren,
+        },
+        {
           type: 'callout',
           tone: 'info',
           title: { en: 'Configuration file', fr: 'Fichier de configuration' },
           text: {
-            en: 'Place your configuration in .openfox/openfox-multi-repo.json at the root of your workspace.',
-            fr: 'Placez votre configuration dans .openfox/openfox-multi-repo.json à la racine de votre projet.',
+            en: 'Place your configuration in .openfox/openfox-multi-repo.json at the root of your workspace. Each project specifies its directory via the "path" field (e.g. "path": "./my-project").',
+            fr: 'Placez votre configuration dans .openfox/openfox-multi-repo.json à la racine de votre projet. Chaque projet indique son répertoire via le champ "path" (ex. "path": "./mon-projet").',
           },
         },
         {
@@ -1070,11 +1306,157 @@ export function register(registry: PluginRegistry): void {
     return buildDevServerUi(context)
   })
 
-  registry.registerRpc('openDevHelpModal', async () => {
+  registry.registerRpc('openDevHelpModal', async (_params, context) => {
+    const workdir = context.workdir ?? process.cwd()
+    const draft = getHelpModalDraft(workdir)
+    const scan = await scanGitRepositories(workdir)
+    draft.discovered = scan.repos
+    draft.scanErrors = scan.errors
+    draft.statusMessage = undefined
+
+    // Pre-populate selection with currently configured projects
+    const configuredPaths = await getConfiguredProjectPaths(workdir)
+    draft.selectedPaths.clear()
+    for (const repo of scan.repos) {
+      if (configuredPaths.has(normalizeRepoPath(repo.relativePath))) {
+        draft.selectedPaths.add(repo.relativePath)
+      }
+    }
+
+    const content = await buildDevHelpModalContent(context)
     return {
       openPanel: 'multirepo-dev-help-modal',
-      content: buildDevHelpModalContent(),
+      content,
     }
+  })
+
+  registry.registerRpc('rescanReposRpc', async (_params, context) => {
+    const workdir = context.workdir ?? process.cwd()
+    const draft = getHelpModalDraft(workdir)
+    const scan = await scanGitRepositories(workdir)
+    draft.discovered = scan.repos
+    draft.scanErrors = scan.errors
+
+    // Keep newly scanned repos in selection if they are configured
+    const configuredPaths = await getConfiguredProjectPaths(workdir)
+    for (const repo of scan.repos) {
+      if (configuredPaths.has(normalizeRepoPath(repo.relativePath))) {
+        draft.selectedPaths.add(repo.relativePath)
+      }
+    }
+
+    draft.statusMessage = {
+      en: `Scan completed. Found ${scan.repos.length} repository(ies).`,
+      fr: `Scan terminé. ${scan.repos.length} dépôt(s) détecté(s).`,
+    }
+    draft.statusTone = 'info'
+    const content = await buildDevHelpModalContent(context)
+    return {
+      content,
+    }
+  })
+
+  registry.registerRpc('toggleHelpRepoSelection', async (params, context) => {
+    const workdir = context.workdir ?? process.cwd()
+    const repoPath = String(params['repoPath'] ?? params['fieldId'] ?? '')
+    const rawVal = params['value']
+    const isChecked = rawVal === true || rawVal === 'true'
+    const draft = getHelpModalDraft(workdir)
+    if (repoPath) {
+      if (isChecked) {
+        draft.selectedPaths.add(repoPath)
+      } else {
+        draft.selectedPaths.delete(repoPath)
+      }
+    }
+    // Automatically persist changes to configuration in real-time
+    const discovered = draft.discovered ?? []
+    const res = await syncProjectsWithMultiRepoConfig(workdir, draft.selectedPaths, discovered)
+    if (res.success) {
+      draft.statusMessage = {
+        en: `Configuration updated (${res.totalConfigured} project(s) configured).`,
+        fr: `Configuration mise à jour (${res.totalConfigured} projet(s) configuré(s)).`,
+      }
+      draft.statusTone = 'success'
+    } else {
+      draft.statusMessage = {
+        en: `Error saving configuration: ${res.error ?? 'Unknown error'}`,
+        fr: `Erreur lors de l'enregistrement de la configuration : ${res.error ?? 'Erreur inconnue'}`,
+      }
+      draft.statusTone = 'danger'
+    }
+
+    const content = await buildDevHelpModalContent(context)
+    return {
+      content,
+    }
+  })
+
+  registry.registerRpc('selectAllHelpReposRpc', async (_params, context) => {
+    const workdir = context.workdir ?? process.cwd()
+    const draft = getHelpModalDraft(workdir)
+    const discovered = draft.discovered ?? []
+    draft.selectedPaths.clear()
+    for (const repo of discovered) {
+      draft.selectedPaths.add(repo.relativePath)
+    }
+    // Automatically persist all projects to configuration in real-time
+    const res = await syncProjectsWithMultiRepoConfig(workdir, draft.selectedPaths, discovered)
+    if (res.success) {
+      draft.statusMessage = {
+        en: `All projects added (${res.totalConfigured} project(s) configured).`,
+        fr: `Tous les projets ajoutés (${res.totalConfigured} projet(s) configuré(s)).`,
+      }
+      draft.statusTone = 'success'
+    }
+    const content = await buildDevHelpModalContent(context)
+    return {
+      content,
+    }
+  })
+
+  registry.registerRpc('unselectAllHelpReposRpc', async (_params, context) => {
+    const workdir = context.workdir ?? process.cwd()
+    const draft = getHelpModalDraft(workdir)
+    const discovered = draft.discovered ?? []
+    draft.selectedPaths.clear()
+    // Automatically remove all projects from configuration in real-time
+    const res = await syncProjectsWithMultiRepoConfig(workdir, draft.selectedPaths, discovered)
+    if (res.success) {
+      draft.statusMessage = {
+        en: `All detected projects removed (${res.totalConfigured} project(s) configured).`,
+        fr: `Tous les projets détectés retirés (${res.totalConfigured} projet(s) configuré(s)).`,
+      }
+      draft.statusTone = 'success'
+    }
+    const content = await buildDevHelpModalContent(context)
+    return {
+      content,
+    }
+  })
+
+  registry.registerRpc('addSelectedReposToConfig', async (_params, context) => {
+    const workdir = context.workdir ?? process.cwd()
+    const draft = getHelpModalDraft(workdir)
+    const discovered = draft.discovered ?? []
+
+    const res = await syncProjectsWithMultiRepoConfig(workdir, draft.selectedPaths, discovered)
+    if (res.success) {
+      draft.statusMessage = {
+        en: `Configuration updated (${res.totalConfigured} project(s) configured, +${res.addedCount}/-${res.removedCount}).`,
+        fr: `Configuration mise à jour (${res.totalConfigured} projet(s) configuré(s), +${res.addedCount}/-${res.removedCount}).`,
+      }
+      draft.statusTone = 'success'
+    } else {
+      draft.statusMessage = {
+        en: `Error saving configuration: ${res.error ?? 'Unknown error'}`,
+        fr: `Erreur lors de l'enregistrement de la configuration : ${res.error ?? 'Erreur inconnue'}`,
+      }
+      draft.statusTone = 'danger'
+    }
+
+    const content = await buildDevHelpModalContent(context)
+    return { content }
   })
 
   registry.registerRpc('openDevLogsModal', async (params, context) => {
@@ -1229,4 +1611,6 @@ export function register(registry: PluginRegistry): void {
 
 export function deactivate(): void {
   stopAllServices()
+  branchDrafts.clear()
+  helpModalDrafts.clear()
 }

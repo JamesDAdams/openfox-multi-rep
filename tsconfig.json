@@ -1,16 +1,21 @@
 {
   "compilerOptions": {
     "target": "ES2022",
+    "lib": ["ES2022"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "lib": ["ES2022"],
     "strict": true,
-    "baseUrl": ".",
-    "paths": {
-      "openfox/plugin": ["../../../src/plugin/index.ts"]
-    },
+    "skipLibCheck": true,
     "noEmit": true,
-    "skipLibCheck": true
+    "baseUrl": ".",
+    "typeRoots": [
+      "./node_modules/@types",
+      "../../openfox/node_modules/@types"
+    ],
+    "types": ["node"],
+    "paths": {
+      "openfox/plugin": ["../../openfox/src/plugin/index.ts"]
+    }
   },
   "include": ["src/**/*.ts", "src/**/*.js"],
   "exclude": []

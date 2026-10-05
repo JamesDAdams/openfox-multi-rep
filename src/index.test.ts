@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execSync } from 'node:child_process'
@@ -517,5 +517,100 @@ describe('plugin index & integration', () => {
     expect(dedicatedRowRight.length).toBe(1) // only 1 Run button, NO logs button
     expect(dedicatedRowRight[0]?.icon).toContain('lucide-play')
     expect(dedicatedRowRight[0]?.title?.en).toContain('migrate')
+  })
+
+  it('openDevHelpModal renders auto-detect section, canonical path examples, and lists discovered repos', async () => {
+    // Create sub-repos in tempDir
+    await mkdir(join(tempDir, 'sub-a', '.git'), { recursive: true })
+    await mkdir(join(tempDir, 'sub-b', '.git'), { recursive: true })
+    const openfoxDir = join(tempDir, '.openfox')
+    await mkdir(openfoxDir, { recursive: true })
+
+    // sub-a is already configured
+    await writeFile(
+      join(openfoxDir, 'openfox-multi-repo.json'),
+      JSON.stringify({
+        projects: [{ name: 'sub-a', path: './sub-a' }],
+      }),
+    )
+
+    const { registry, rpcs } = createMockRegistry()
+    register(registry)
+
+    const context: PluginToolContext = { sessionId: 'sess-help-1', workdir: tempDir }
+    const res = (await rpcs['openDevHelpModal']?.({}, context)) as {
+      openPanel: string
+      content: Array<Record<string, unknown>>
+    }
+
+    expect(res.openPanel).toBe('multirepo-dev-help-modal')
+    expect(res.content.length).toBeGreaterThan(0)
+
+    const stack = res.content[0] as { children: Array<Record<string, unknown>> }
+    expect(stack.children.length).toBeGreaterThanOrEqual(4)
+
+    // First child is Auto-Detect card
+    const autoDetectCard = stack.children[0] as {
+      title?: { en: string; fr: string }
+      children: Array<Record<string, unknown>>
+    }
+    expect(autoDetectCard.title?.en).toBe('Auto-Detect Git Projects')
+    expect(autoDetectCard.title?.fr).toBe('Détection automatique des projets Git')
+
+    // Find the example card and verify canonical path is used
+    const exampleCard = stack.children.find(
+      (c) => (c as { title?: { en: string } }).title?.en?.includes('Complete Example'),
+    ) as { children: Array<{ text?: { en: string } }> } | undefined
+    expect(exampleCard).toBeDefined()
+    expect(exampleCard?.children[0]?.text?.en).toContain('"path": "./frontend"')
+    expect(exampleCard?.children[0]?.text?.en).not.toContain('"./hub-gan-pat-mobile"')
+
+    // Test selectAllHelpReposRpc selects both sub-a and sub-b
+    const selectAllRes = (await rpcs['selectAllHelpReposRpc']?.({}, context)) as {
+      content: Array<Record<string, unknown>>
+    }
+    expect(selectAllRes.content).toBeDefined()
+
+    // Add selected projects to config
+    const addRes = (await rpcs['addSelectedReposToConfig']?.({}, context)) as {
+      content: Array<Record<string, unknown>>
+    }
+    expect(addRes.content).toBeDefined()
+
+    // Verify config file was updated with both sub-a and sub-b
+    const updatedRaw = await readFile(join(openfoxDir, 'openfox-multi-repo.json'), 'utf8')
+    const updatedParsed = JSON.parse(updatedRaw) as {
+      projects: Array<{ name: string; path: string; dev?: unknown; commands?: unknown }>
+    }
+    expect(updatedParsed.projects).toHaveLength(2)
+    expect(updatedParsed.projects[0]?.name).toBe('sub-a')
+    expect(updatedParsed.projects[1]).toEqual({
+      name: 'sub-b',
+      path: './sub-b',
+    })
+    expect(updatedParsed.projects[1]?.dev).toBeUndefined()
+    expect(updatedParsed.projects[1]?.commands).toBeUndefined()
+
+    // Uncheck sub-a: toggle directly updates and removes sub-a in real-time
+    await rpcs['toggleHelpRepoSelection']?.({ repoPath: 'sub-a', value: 'false' }, context)
+
+    const updatedRaw2 = await readFile(join(openfoxDir, 'openfox-multi-repo.json'), 'utf8')
+    const updatedParsed2 = JSON.parse(updatedRaw2) as {
+      projects: Array<{ name: string; path: string }>
+    }
+    expect(updatedParsed2.projects).toHaveLength(1)
+    expect(updatedParsed2.projects[0]?.name).toBe('sub-b')
+
+    // Test unselectAllHelpReposRpc directly removes all
+    const unselectAllRes = (await rpcs['unselectAllHelpReposRpc']?.({}, context)) as {
+      content: Array<Record<string, unknown>>
+    }
+    expect(unselectAllRes.content).toBeDefined()
+
+    const updatedRaw3 = await readFile(join(openfoxDir, 'openfox-multi-repo.json'), 'utf8')
+    const updatedParsed3 = JSON.parse(updatedRaw3) as {
+      projects: Array<{ name: string; path: string }>
+    }
+    expect(updatedParsed3.projects).toHaveLength(0)
   })
 })
