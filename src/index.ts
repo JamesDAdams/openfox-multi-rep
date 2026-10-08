@@ -5,7 +5,7 @@ import { multirepoAgentTransform } from './transforms.js'
 import { multirepoGitUiOverride, multiDevServerUiOverride, multirepoBranchModal, multirepoDevLogsModal, multirepoDevHelpModal } from './ui.js'
 import { multirepoStatusTool, multirepoDevTool } from './tools.js'
 import { startService, stopService, stopAllServices, getServicesState, getServiceLogs } from './dev-servers.js'
-import { findSubGitRepos, discoverDevServices, type DevServerService } from './discovery.js'
+import { findSubGitRepos, discoverDevServices, findServiceByAnyName, type DevServerService } from './discovery.js'
 import { getCurrentBranch, listRepoBranches, switchRepoBranch, createRepoBranch, getRepoDefaultBranch } from './git-ops.js'
 import { resolveLucideIcon } from './icons.js'
 import {
@@ -16,7 +16,16 @@ import {
   normalizeRepoPath,
   type DiscoveredGitRepo,
 } from './repository-scanner.js'
+import {
+  setTrackerContext,
+  clearSessionModifiedFiles,
+  handleToolCompleted,
+  recordSessionModifiedFile,
+  getSessionModifiedFiles,
+  isSessionFilterEnabled,
+} from './session-tracker.js'
 export * from './icons.js'
+export * from './session-tracker.js'
 
 interface BranchModalDraft {
   query: string
@@ -277,7 +286,7 @@ async function buildGitSidebarUi(context: PluginToolContext) {
     return {}
   }
 
-  const diffFiles = await multirepoVcsProvider.getDiffFiles(context)
+  const diffFiles = await multirepoVcsProvider.getDiffFiles({ workdir: context.workdir })
 
   const repoCards: DeclarativeNode[] = await Promise.all(
     repos.map(async (repo) => {
@@ -417,12 +426,19 @@ async function buildGitSidebarUi(context: PluginToolContext) {
 
 async function buildDevLogsModalContent(name: string, context: PluginToolContext): Promise<DeclarativeNode[]> {
   const services = await discoverDevServices(context.workdir)
-  const svc = services.find((s) => s.id === name || s.name === name)
+  const svc = findServiceByAnyName(services, name) ?? services.find((s) => s.id === name || s.name === name)
   const serviceKey = svc?.id ?? name
   const states = getServicesState()
-  const state = states.find((s) => s.name === serviceKey || s.name === name)
+  const state = states.find(
+    (s) =>
+      s.name === serviceKey ||
+      s.name === name ||
+      (svc && (s.name === svc.id || s.name === svc.name || s.name === svc.projectName)),
+  )
   const isRunning = state?.status === 'running'
-  const logs = getServiceLogs(serviceKey)
+  const directLogs = getServiceLogs(serviceKey)
+  const fallbackLogs = svc ? getServiceLogs(svc.id) : []
+  const logs = directLogs.length > 0 ? directLogs : fallbackLogs.length > 0 ? fallbackLogs : getServiceLogs(name)
   const logsText = logs.length > 0 ? logs.join('\n') : '(No logs recorded yet)'
 
   const displayTitle = svc?.name
@@ -1225,6 +1241,12 @@ async function buildDevServerUi(context: PluginToolContext) {
 }
 
 export function register(registry: PluginRegistry): void {
+  setTrackerContext(registry.context, registry.runtime)
+
+  registry.registerHook('tool.completed', async (payload) => {
+    handleToolCompleted(payload)
+  })
+
   // 1. Enregistrement du VCS Provider
   registry.registerVcsProvider(multirepoVcsProvider)
 
@@ -1245,6 +1267,19 @@ export function register(registry: PluginRegistry): void {
   // 4b. Enregistrement des Paramètres & Guide Multi-Repo dans les réglages
   registry.registerSettings({
     fields: [
+      {
+        key: 'sessionModifiedFilesOnly',
+        type: 'boolean',
+        default: true,
+        label: {
+          en: 'Limit verifier and code reviewer to session files',
+          fr: 'Limiter le vérificateur et le code reviewer aux fichiers de la session',
+        },
+        description: {
+          en: 'When enabled, only files modified during the current conversation are sent to verifier and code reviewer agents instead of all modified files across all repositories.',
+          fr: 'Si activé, seuls les fichiers modifiés au cours de la conversation actuelle sont envoyés aux agents vérificateur et code reviewer au lieu de tous les fichiers modifiés de tous les dépôts.',
+        },
+      },
       {
         key: 'helpGuide',
         type: 'button',
@@ -1477,21 +1512,81 @@ export function register(registry: PluginRegistry): void {
     }
   })
 
+  registry.registerRpc('getDevServices', async (_params, context) => {
+    const workdir = context.workdir ?? process.cwd()
+    const services = await discoverDevServices(workdir)
+    const states = getServicesState()
+    return {
+      services: services.map((s) => {
+        const state = states.find((st) => st.name === s.id || st.name === s.name || st.name === s.projectName)
+        return {
+          id: s.id,
+          name: s.name,
+          kind: s.kind,
+          projectName: s.projectName,
+          command: s.command,
+          relativePath: s.relativePath,
+          absolutePath: s.absolutePath,
+          port: s.port,
+          status: state?.status ?? 'stopped',
+          logCount: state?.logCount ?? 0,
+        }
+      }),
+    }
+  })
+
+  registry.registerRpc('getDevServiceLogs', async (params, context) => {
+    const rawName = String(params['name'] ?? '')
+    let logs = getServiceLogs(rawName)
+    if (logs.length === 0 && rawName) {
+      const services = await discoverDevServices(context.workdir ?? process.cwd())
+      const target = findServiceByAnyName(services, rawName)
+      if (target) {
+        logs = getServiceLogs(target.id)
+      }
+    }
+    return { logs }
+  })
+
   registry.registerRpc('startDevService', async (params, context) => {
-    const name = String(params['name'] ?? '')
-    const cwd = String(params['cwd'] ?? context.workdir ?? process.cwd())
-    const command = String(params['command'] ?? 'npm run dev')
-    if (name) {
-      startService(name, cwd, command)
+    let rawName = String(params['name'] ?? '')
+    let cwd = params['cwd'] ? String(params['cwd']) : undefined
+    let command = params['command'] ? String(params['command']) : undefined
+
+    const services = await discoverDevServices(context.workdir ?? process.cwd())
+    if (!rawName && services.length > 0) {
+      const first = services[0]
+      rawName = first.id
+      cwd = cwd ?? first.absolutePath
+      command = command ?? first.command
+    }
+
+    let serviceKey = rawName
+
+    if (rawName) {
+      const target = findServiceByAnyName(services, rawName)
+      if (target) {
+        serviceKey = target.id
+        cwd = cwd ?? target.absolutePath
+        command = command ?? target.command
+      }
+      startService(serviceKey, cwd ?? (context.workdir ?? process.cwd()), command ?? 'npm run dev')
+    } else {
+      return { success: false, error: 'No dev services found to start' }
     }
     const ui = await buildDevServerUi(context)
-    return { success: true, ...ui }
+    return { success: true, serviceKey, ...ui }
   })
 
   registry.registerRpc('stopDevService', async (params, context) => {
-    const name = String(params['name'] ?? '')
-    if (name) {
-      stopService(name)
+    const rawName = String(params['name'] ?? '')
+    if (rawName) {
+      const services = await discoverDevServices(context.workdir ?? process.cwd())
+      const target = findServiceByAnyName(services, rawName)
+      stopService(target ? target.id : rawName)
+      if (target && target.id !== rawName) {
+        stopService(rawName)
+      }
     }
     const ui = await buildDevServerUi(context)
     return { success: true, ...ui }
@@ -1613,4 +1708,6 @@ export function deactivate(): void {
   stopAllServices()
   branchDrafts.clear()
   helpModalDrafts.clear()
+  clearSessionModifiedFiles()
+  setTrackerContext(undefined, undefined)
 }

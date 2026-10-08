@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execSync } from 'node:child_process'
-import { register, deactivate } from './index.js'
+import { register, deactivate, getSessionModifiedFiles } from './index.js'
 import type { PluginRegistry, PluginToolContext } from 'openfox/plugin'
 
 function createMockRegistry() {
@@ -50,6 +50,7 @@ function createMockRegistry() {
     registerMessageTransform: record('messageTransform'),
     registerDangerLevel: record('dangerLevel'),
     registerVcsProvider: record('vcsProvider'),
+    registerThinkingGuard: record('thinkingGuard'),
   }
 
   return { registry, calls, rpcs }
@@ -80,6 +81,12 @@ describe('plugin index & integration', () => {
     expect(calls['uiComponent']).toHaveLength(1)
     expect(calls['command']).toHaveLength(1)
     expect(calls['settings']).toHaveLength(1)
+    const settingsSchema = calls['settings']?.[0] as { fields: Array<{ key: string; default?: unknown }> }
+    const sessionSetting = settingsSchema.fields.find((f) => f.key === 'sessionModifiedFilesOnly')
+    expect(sessionSetting).toBeDefined()
+    expect(sessionSetting?.default).toBe(true)
+
+    expect(calls['hook:tool.completed']).toHaveLength(1)
 
     expect(rpcs['getGitSidebarUi']).toBeDefined()
     expect(rpcs['getDevServerUi']).toBeDefined()
@@ -104,6 +111,35 @@ describe('plugin index & integration', () => {
 
     const devUi = (await rpcs['getDevServerUi']?.({}, context)) as { content?: unknown }
     expect(devUi).toEqual({})
+  })
+
+  it('tracks tool.completed hooks and clears state on deactivate', async () => {
+    const { registry, calls } = createMockRegistry()
+    register(registry)
+
+    const hookHandler = calls['hook:tool.completed']?.[0] as (payload: unknown) => Promise<void>
+    expect(hookHandler).toBeDefined()
+
+    await hookHandler({
+      sessionId: 'session-hook-test',
+      data: {
+        tool: 'write_file',
+        arguments: { path: 'packages/sub/file.ts' },
+        result: {
+          success: true,
+          output: 'Successfully wrote 10 lines to packages/sub/file.ts',
+          metadata: { path: join(tempDir, 'packages/sub/file.ts') },
+        },
+      },
+    })
+
+    const filesBefore = getSessionModifiedFiles('session-hook-test', tempDir)
+    expect(filesBefore).toContain('packages/sub/file.ts')
+
+    deactivate()
+
+    const filesAfter = getSessionModifiedFiles('session-hook-test', tempDir)
+    expect(filesAfter.size).toBe(0)
   })
 
   it('provides declarative Git sidebar UI per repo with branch, edit button, and diffs when configured', async () => {

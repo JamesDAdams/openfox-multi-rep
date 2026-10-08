@@ -6,5 +6,6 @@ export default defineConfig({
   dts: false,
   clean: true,
   sourcemap: true,
+  target: 'node20',
   external: ['openfox', 'openfox/plugin'],
 })

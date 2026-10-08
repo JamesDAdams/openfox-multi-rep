@@ -6,6 +6,7 @@ Multi-repository Git management and multi-devserver orchestration plugin for [Op
 
 - **Multi-Repo Git Discovery & Status**: Auto-discover Git repositories across workspace roots, subdirectories, and nested projects.
 - **VCS Provider**: View status, branch information, ahead/behind counts, and staged/unstaged changes across multiple repositories simultaneously.
+- **Session-scoped verification diffs**: Filter modified files sent to `verifier` and `code_reviewer` agents (`{{modifiedFiles}}`) to only files modified during the current conversation (`sessionModifiedFilesOnly`, enabled by default).
 - **Git Operations**: Checkout, fetch, pull, commit, branch creation, and stash management per repository.
 - **Multi-DevServer Management**: Discover, start, stop, restart, and monitor multiple dev server configurations (`.openfox/dev.json` or sub-project dev scripts).
 - **Tools & RPC**: Built-in agent tools (`multirepo_list`, `multirepo_status`, `multirepo_git_action`, `multirepo_devserver_action`) for automated multi-repo workflows.

@@ -1,10 +1,15 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execSync } from 'node:child_process'
-import type { PluginVcsDiffFile } from 'openfox/plugin'
+import type { PluginVcsDiffFile, PluginContext } from 'openfox/plugin'
 import { multirepoVcsProvider } from './vcs-provider.js'
+import {
+  recordSessionModifiedFile,
+  clearSessionModifiedFiles,
+  setTrackerContext,
+} from './session-tracker.js'
 
 describe('vcs-provider module', () => {
   let tempDir: string
@@ -14,6 +19,8 @@ describe('vcs-provider module', () => {
   })
 
   afterEach(async () => {
+    clearSessionModifiedFiles()
+    setTrackerContext(undefined, undefined)
     await rm(tempDir, { recursive: true, force: true })
   })
 
@@ -146,5 +153,81 @@ describe('vcs-provider module', () => {
         { workdir: tempDir },
       ),
     ).toBe('- backend/server.ts (modified)\n- frontend/styles.css (added)')
+  })
+
+  it('filters diff files and formats according to session modified files', async () => {
+    const backend = join(tempDir, 'backend')
+    const frontend = join(tempDir, 'frontend')
+    const openfoxDir = join(tempDir, '.openfox')
+    await mkdir(backend, { recursive: true })
+    await mkdir(frontend, { recursive: true })
+    await mkdir(openfoxDir, { recursive: true })
+
+    await writeFile(
+      join(openfoxDir, 'openfox-multi-repo.json'),
+      JSON.stringify({ projects: [{ name: 'backend', path: 'backend' }, { name: 'frontend', path: 'frontend' }] }),
+    )
+
+    execSync('git init && git config user.name "Test" && git config user.email "test@example.com"', { cwd: backend })
+    await writeFile(join(backend, 'server.ts'), 'console.log("initial")')
+    execSync('git add . && git commit -m "init backend"', { cwd: backend })
+
+    execSync('git init && git config user.name "Test" && git config user.email "test@example.com"', { cwd: frontend })
+    await writeFile(join(frontend, 'App.tsx'), 'export const App = () => 1')
+    execSync('git add . && git commit -m "init frontend"', { cwd: frontend })
+
+    await writeFile(join(backend, 'server.ts'), 'console.log("modified")')
+    await writeFile(join(frontend, 'style.css'), 'body {}')
+
+    recordSessionModifiedFile('session-abc', 'backend/server.ts')
+
+    const allDiff = await multirepoVcsProvider.getDiffFiles({ workdir: tempDir })
+    expect(allDiff).toHaveLength(2)
+
+    const sessionDiff = await multirepoVcsProvider.getDiffFiles({ workdir: tempDir, sessionId: 'session-abc' })
+    expect(sessionDiff).toHaveLength(1)
+    expect(sessionDiff[0]?.path).toBe('backend/server.ts')
+
+    const formattedSession = multirepoVcsProvider.formatModifiedFiles?.(allDiff, {
+      workdir: tempDir,
+      sessionId: 'session-abc',
+    })
+    expect(formattedSession).toBe('- backend/server.ts (modified)')
+
+    const emptySessionDiff = await multirepoVcsProvider.getDiffFiles({
+      workdir: tempDir,
+      sessionId: 'session-empty',
+    })
+    expect(emptySessionDiff).toHaveLength(0)
+
+    const formattedEmpty = multirepoVcsProvider.formatModifiedFiles?.(allDiff, {
+      workdir: tempDir,
+      sessionId: 'session-empty',
+    })
+    expect(formattedEmpty).toBe('(none)')
+
+    const mockDisabledContext: PluginContext = {
+      id: 'test',
+      version: '1.0',
+      runtime: { mode: 'development', configDirectory: tempDir },
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      storage: { get: () => undefined, set: vi.fn() },
+      settings: () => ({ sessionModifiedFilesOnly: false }),
+      notify: vi.fn(),
+      publish: vi.fn(),
+    }
+    setTrackerContext(mockDisabledContext)
+
+    const disabledDiff = await multirepoVcsProvider.getDiffFiles({
+      workdir: tempDir,
+      sessionId: 'session-abc',
+    })
+    expect(disabledDiff).toHaveLength(2)
+
+    const formattedDisabled = multirepoVcsProvider.formatModifiedFiles?.(allDiff, {
+      workdir: tempDir,
+      sessionId: 'session-abc',
+    })
+    expect(formattedDisabled).toBe('- backend/server.ts (modified)\n- frontend/style.css (added)')
   })
 })

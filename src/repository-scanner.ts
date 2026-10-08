@@ -1,5 +1,6 @@
 import { readdir, readFile, writeFile, mkdir, rename, rm } from 'node:fs/promises'
 import { join, resolve, relative, isAbsolute, basename } from 'node:path'
+import { parseCompactTableString } from './discovery.js'
 
 export interface DiscoveredGitRepo {
   name: string
@@ -165,12 +166,19 @@ export async function getConfiguredProjectPaths(rootWorkdir: string): Promise<Se
   try {
     const configPath = join(rootWorkdir, '.openfox', 'openfox-multi-repo.json')
     const content = await readFile(configPath, 'utf8')
-    const parsed = JSON.parse(content) as { projects?: Array<unknown> }
-    if (!parsed || !Array.isArray(parsed.projects)) {
-      return configured
+    let rawProjects: Array<unknown> = []
+    if (content.trim().startsWith('[')) {
+      rawProjects = parseCompactTableString(content)
+    } else {
+      const parsed = JSON.parse(content) as { projects?: Array<unknown> | string }
+      if (Array.isArray(parsed?.projects)) {
+        rawProjects = parsed.projects
+      } else if (typeof parsed?.projects === 'string') {
+        rawProjects = parseCompactTableString(parsed.projects)
+      }
     }
 
-    for (const item of parsed.projects) {
+    for (const item of rawProjects) {
       const p = getProjectPathFromConfigEntry(item)
       if (p) {
         configured.add(p)

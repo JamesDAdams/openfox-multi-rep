@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { join } from 'node:path'
 import type { PluginVcsContext, PluginVcsDiffFile, PluginVcsProvider } from 'openfox/plugin'
 import { findSubGitRepos, isMultiRepoProject, type GitRepoInfo } from './discovery.js'
+import { getSessionModifiedFiles, isSessionFilterEnabled, isFileInSession } from './session-tracker.js'
 
 function runGit(cwd: string, args: string[]): Promise<{ stdout: string; code: number }> {
   return new Promise((resolve) => {
@@ -101,7 +102,14 @@ export const multirepoVcsProvider: PluginVcsProvider = {
   async getDiffFiles(context: PluginVcsContext): Promise<PluginVcsDiffFile[]> {
     const repos = await findSubGitRepos(context.workdir)
     const diffArrays = await Promise.all(repos.map((repo) => getRepoDiff(repo)))
-    return diffArrays.flat()
+    const allFiles = diffArrays.flat()
+
+    if (!context.sessionId || !isSessionFilterEnabled(context.projectId)) {
+      return allFiles
+    }
+
+    const sessionFiles = getSessionModifiedFiles(context.sessionId, context.workdir)
+    return allFiles.filter((f) => isFileInSession(f.path, sessionFiles, context.workdir))
   },
 
   async getBranch(context: PluginVcsContext): Promise<string | null> {
@@ -120,8 +128,14 @@ export const multirepoVcsProvider: PluginVcsProvider = {
     return `multi [${branches.map((b) => `${b.name}:${b.branch}`).join(', ')}]`
   },
 
-  formatModifiedFiles(files: PluginVcsDiffFile[]): string {
-    if (files.length === 0) return '(none)'
-    return files.map((f) => `- ${f.path} (${f.status})`).join('\n')
+  formatModifiedFiles(files: PluginVcsDiffFile[], context?: PluginVcsContext): string {
+    let targetFiles = files
+    if (context?.sessionId && isSessionFilterEnabled(context?.projectId)) {
+      const sessionFiles = getSessionModifiedFiles(context.sessionId, context.workdir)
+      targetFiles = files.filter((f) => isFileInSession(f.path, sessionFiles, context.workdir))
+    }
+
+    if (targetFiles.length === 0) return '(none)'
+    return targetFiles.map((f) => `- ${f.path} (${f.status})`).join('\n')
   },
 }

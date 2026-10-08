@@ -259,6 +259,74 @@ describe('discovery & configuration module', () => {
     expect(services[0]?.projectName).toBe('openfox')
     expect(services[0]?.command).toBe('OPENFOX_PORT=10469 npm run dev')
     expect(services[0]?.relativePath).toBe('openfox')
+    expect(services[0]?.port).toBe(10469)
+  })
+
+  it('extracts port correctly from various command formats', async () => {
+    const openfoxDir = join(tempDir, '.openfox')
+    await mkdir(openfoxDir, { recursive: true })
+
+    const config = {
+      projects: [
+        {
+          name: 'p1',
+          path: './p1',
+          dev: 'PORT=3000 npm run start',
+        },
+        {
+          name: 'p2',
+          path: './p2',
+          dev: [{ name: 'vite', command: 'vite --port 5173' }],
+        },
+        {
+          name: 'p3',
+          path: './p3',
+          dev: 'node server.js -p 8080',
+        },
+      ],
+    }
+
+    await writeFile(join(openfoxDir, 'openfox-multi-repo.json'), JSON.stringify(config, null, 2))
+
+    const services = await discoverDevServices(tempDir)
+    expect(services).toHaveLength(3)
+    expect(services[0]?.port).toBe(3000)
+    expect(services[1]?.port).toBe(5173)
+    expect(services[2]?.port).toBe(8080)
+  })
+
+  it('findServiceByAnyName matches direct, composite, stripped and project names', async () => {
+    const { findServiceByAnyName } = await import('./discovery.js')
+    const services = [
+      {
+        id: 'openfox:server:0:dev',
+        kind: 'server' as const,
+        name: 'dev',
+        projectName: 'openfox',
+        command: 'OPENFOX_PORT=10471 npm run dev',
+        relativePath: 'openfox',
+        absolutePath: '/app/openfox',
+        port: 10471,
+      },
+      {
+        id: 'agent-office:server:0:start',
+        kind: 'server' as const,
+        name: 'start',
+        projectName: 'agent-office',
+        command: 'npm run start',
+        relativePath: 'agent-office',
+        absolutePath: '/app/agent-office',
+        port: 4600,
+      },
+    ]
+
+    expect(findServiceByAnyName(services, 'openfox:server:0:dev')?.id).toBe('openfox:server:0:dev')
+    expect(findServiceByAnyName(services, 'openfox › dev')?.id).toBe('openfox:server:0:dev')
+    expect(findServiceByAnyName(services, 'openfox › dev (Stopped)')?.id).toBe('openfox:server:0:dev')
+    expect(findServiceByAnyName(services, 'openfox › dev (Running)')?.id).toBe('openfox:server:0:dev')
+    expect(findServiceByAnyName(services, 'openfox > dev')?.id).toBe('openfox:server:0:dev')
+    expect(findServiceByAnyName(services, 'agent-office')?.id).toBe('agent-office:server:0:start')
+    expect(findServiceByAnyName(services, 'nonexistent')).toBeUndefined()
   })
 
   it('explicit path takes precedence over any legacy dynamic key', async () => {

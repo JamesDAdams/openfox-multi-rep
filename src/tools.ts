@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import type { PluginTool } from 'openfox/plugin'
-import { findSubGitRepos, discoverDevServices } from './discovery.js'
+import { findSubGitRepos, discoverDevServices, findServiceByAnyName } from './discovery.js'
 import { startService, stopService, getServicesState } from './dev-servers.js'
 
 function runGit(cwd: string, args: string[]): Promise<{ stdout: string; code: number }> {
@@ -97,7 +97,7 @@ export const multirepoDevTool: PluginTool = {
         return { success: false, error: 'Paramètre "name" requis pour démarrer un service.' }
       }
       const services = await discoverDevServices(context.workdir)
-      const service = services.find((s) => s.id === name || s.name === name || s.projectName === name)
+      const service = findServiceByAnyName(services, name)
       if (!service) {
         return { success: false, error: `Service "${name}" introuvable.` }
       }
@@ -110,7 +110,7 @@ export const multirepoDevTool: PluginTool = {
         return { success: false, error: 'Paramètre "name" requis pour arrêter un service.' }
       }
       const services = await discoverDevServices(context.workdir)
-      const service = services.find((s) => s.id === name || s.name === name || s.projectName === name)
+      const service = findServiceByAnyName(services, name)
       const targetName = service?.id ?? name
       stopService(targetName)
       return { success: true, output: `Service "${name}" arrêté.` }

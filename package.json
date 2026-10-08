@@ -1,6 +1,6 @@
 {
   "name": "openfox-multirepo-plugin",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Support multi-dépôts Git et orchestration de multiples serveurs de dev pour OpenFox.",
   "type": "module",
   "main": "./dist/index.js",
